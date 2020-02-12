@@ -14,12 +14,12 @@ S05_RNA_sexchrom_dels.Rmd | Calculates coverage over sex chromosomes and creates
 File | Description | Used in script
 -----|------------|---------
 Ensembl_IDs.txt | List of Ensembl transcript IDs and associated gene names | S01, S02, S04, S05
-ensemblIDS_chromosomes | List of Ensembl transcript IDs, associated gene names, and the chromosome in which they reside | S05
-exome_mutation_list_csq_UV_MAF_20200211 | Combined list of all validated or inferred mutations identified in exome data | S03
-mutation_burdens_20200211 | Calculated mutation burdens for each clone | S03
-mutation_burdens_plot_20200211 | Calculated mutation burdens for each clone reorganised in script S03 | S04
-Signature7abc_PJ | Mutation signatures as defined my Petljak et al 2019 | S03
-ucsf_mutation_list_csq_UV_MAF_20200211 | Combined list of all validated or inferred mutations identified in UCSF500 data | S03
+ensemblIDS_chromosomes.txt | List of Ensembl transcript IDs, associated gene names, and the chromosome in which they reside | S05
+exome_mutation_list_csq_UV_MAF_20200211.txt | Combined list of all validated or inferred mutations identified in exome data | S03
+mutation_burdens_20200211.csv | Calculated mutation burdens for each clone | S03
+mutation_burdens_plot_20200211.csv | Calculated mutation burdens for each clone reorganised in script S03 | S04
+Signature7abc_PJ.csv | Mutation signatures as defined my Petljak et al 2019 | S03
+ucsf_mutation_list_csq_UV_MAF_20200211.txt | Combined list of all validated or inferred mutations identified in UCSF500 data | S03
 
 ## Also included:
 
