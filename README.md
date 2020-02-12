@@ -1,5 +1,5 @@
 # Melanocytes_Tang2020
- R scripts and resources to accompany Tang/Fewings et al 2020 et al 2020 manuscript
+ R scripts and resources to accompany Tang/Fewings et al 2020 manuscript
  
 ## Scripts:
 File | Description
