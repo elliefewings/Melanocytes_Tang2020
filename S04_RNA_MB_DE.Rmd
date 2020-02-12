@@ -1,0 +1,183 @@
+---
+title: "S04_RNA_MB_DE"
+author: "Eleanor Fewings"
+output: html_document
+---
+  
+# start_section  
+  
+```{r start_section}
+
+# Time stamp
+Sys.time()
+
+# Clean up
+rm(list=ls())
+
+# Load libraries
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(Rtsne)
+library(ggplot2)
+library(DESeq2)
+library(pheatmap)
+library(data.table)
+library(stringr)
+library(plotly)
+library(multigrep)
+library(tibble)
+
+# Folders
+setwd("~")
+
+```
+
+# Determine donor/sites with greater than 3 standard deviations of mutation burdens
+```{r mb}
+
+# Load previous mutation burden plot file
+mb <- read.table("resources/mutation_burdens_plot_20200211.csv", sep=",", header = TRUE, stringsAsFactors = FALSE)
+
+# Set sample name as factor
+mb$sample2 <- factor(mb$sample, levels=mb$sample)
+
+# Calculate donor/site standard deviation
+mb <- mb %>% group_by(donor, site) %>% mutate(patsitesd=sd(mb))
+
+# Create table of samples with > 3 standard deviations and containing more than 5 different samples
+mb <- mb %>% filter(patsitesd > 3) %>% group_by(donor, site) %>% filter(length(sample) > 5)
+
+# Normalise mutation burdens to each donor/site median
+mb$norm <- mb$mb/mb$psitemb
+
+# Plot normalised mutation burdens
+ggplot(mb, aes(x=sample2, y=norm)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.text.y = element_text(size = 15), axis.title.y=element_text(size = 15)) +
+  xlab("") +
+  ylab("Normalised mutation Burden per Megabase\n")
+
+# Select samples to RNA data
+sms <- mb$sample
+
+# Create list of files to open
+fns <- list.files("~/HShain/RNA", pattern="*_genes_results", full.names = FALSE)
+
+fns.uq <- fns[multigrep(sms, fns)]
+
+# Read all files and merge
+setwd("~/RNA/")
+data <- do.call("cbind", lapply(fns.uq, function(x) read.table(x, header = TRUE, stringsAsFactors = FALSE, 
+                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(x, "_genes_results", ""), "TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", "FPKM_ci_upper_bound") )))
+
+# Set transcript key
+key <- data %>% subset(select=c("gene_id", "transcript_id.s."))
+
+key$transcript <- sapply(strsplit(key$transcript_id.s., ","), '[', 1)
+
+# Add gene names to transcript key
+genes <- read.table("~/resources/Ensembl_IDs.txt", header=TRUE, stringsAsFactors = FALSE)
+key <- merge(key, genes, by="gene_id")
+
+row.names(data) <- key$transcript
+
+# Set samples
+samples <- str_replace_all(fns.uq, "_genes_results", "")
+
+# Merge gene names onto data
+data.g <- merge(key, data, by.x="transcript", by.y="row.names")
+
+# Remove duplicate genes and NAs
+o <- data.g[order(rowSums(subset(data.g, select=c(samples))), decreasing=TRUE),]
+d <- o[!duplicated(o$GeneName),]
+
+row.names(d) <- d$GeneName
+
+data <- d %>% subset(select=c(samples))
+
+# Create matrix
+data.m <- as.matrix(data)
+
+# Clean up
+rm(fns, d, o, data.g, key, genes, fns.uq, data, sms)
+```
+
+# Create DeSeq data
+```{r data}
+
+# Create sample information for DeSeq
+coldata <- data.frame(site=mb$site, donor=mb$donor, row.names = mb$sample, mb=mb$norm)
+
+# Reorder data to match coldata
+data.m <- data.m %>% subset(select=row.names(coldata))
+
+# Convert all to integers for DeSeq
+m.int <- apply(data.m, c(1, 2), function(x){
+  (as.integer(x))
+})
+
+# Create DeSeq data normalising for donor differences and testing for differential expression on normalised mutation burden
+dds <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~donor + mb)
+
+# Filtering out transcripts with less than 10 counts across all samples (see DeSeq best practices)
+dds <- dds[rowSums(counts(dds)) >= 10,]
+
+#Clean up
+rm(data.m, samples)
+```
+
+# Run Differential Expression
+```{r DE}
+
+# Run differential expression analysis
+de <- DESeq(dds)
+
+# Create results set
+res.cont <- results(de)
+
+# Set NA p values to 1
+res.cont$padj[is.na(res.cont$padj)] <- 1
+
+# Select significant genes (p < 0.01)
+top.cont <- res.cont[res.cont$padj <= 0.01,]
+top.cont <- top.cont[order(top.cont$padj),]
+
+# Create list of significant genes
+genes <- row.names(top.cont)
+
+# Clean up
+rm(res.cont)
+
+```
+
+# Plot heatmap for significantly differentially expressed genes
+```{r plot}
+
+# Normalisation
+ntd <- normTransform(dds, f = log2, pc=1)
+
+# Remove batch effect based on donor
+nbatch <- limma::removeBatchEffect(assay(ntd), batch=coldata$donor)
+
+# Create annotation data dataframe
+df <- data.frame(mb=colData(dds)[,"mb"], row.names = row.names(colData(dds)))
+
+# Select significantly differentially expressed genes
+top.ntd <- assay(ntd)[row.names(assay(ntd)) %in% genes,]
+
+# Order genes by p value
+top.ntd <- top.ntd[match(genes, row.names(top.ntd)),]
+
+# Order coldata table by decreasing normalised mutation burden
+mb.dec <- coldata[order(coldata$mb, decreasing=TRUE),]
+
+# Order expression data by decreasing normalised mutation burden using table above
+ordered <- top.ntd %>% subset(select=row.names(mb.dec))
+
+# Plot heatmap
+pheatmap(ordered, cluster_rows=TRUE, cluster_cols=FALSE, show_rownames=TRUE, annotation_col=df)
+
+# Clean up
+rm(df, mb.dec, nbatch, dds, de, genes, ntd, top.cont, top.ntd, ordered)
+```

@@ -1,0 +1,150 @@
+---
+title: "S05_RNA_sexchroms_dels"
+author: "Eleanor Fewings"
+output: html_document
+---
+  
+# start_section  
+  
+```{r start_section}
+
+# Time stamp
+Sys.time()
+
+# Clean up
+rm(list=ls())
+
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(Rtsne)
+library(ggplot2)
+library(DESeq2)
+library(pheatmap)
+library(data.table)
+library(stringr)
+library(plotly)
+library(multigrep)
+library(openxlsx)
+
+# Folders
+setwd("~")
+
+```
+
+# Import_data
+```{r import_data}
+# Set read dir containing genes_results files
+setwd("~/RNA")
+
+# Create list of files
+fns <- list.files("~/RNA", pattern="*_genes_results", full.names = FALSE)
+
+# Read in TableS1 for sample names and information
+ss <- read.xlsx("TableS1.xlsx", startRow = 2, colNames = TRUE)
+
+# Select samples from TableS1
+fns.uq <- fns[multigrep(ss$ID, fns)]
+
+# Read all files and merge
+data <- do.call("cbind", lapply(fns.uq, function(x) read.table(x, header = TRUE, stringsAsFactors = FALSE, 
+                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(x, "_genes_results", ""), "TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", "FPKM_ci_upper_bound"))))
+
+# Set transcript key
+key <- data %>% subset(select=c("gene_id", "transcript_id.s."))
+
+key$transcript <- sapply(strsplit(key$transcript_id.s., ","), '[', 1)
+
+# Add gene names to transcript key
+genes <- read.table("~/resources/Ensembl_IDs.txt", header=TRUE, stringsAsFactors = FALSE)
+key <- merge(key, genes, by="gene_id")
+
+row.names(data) <- data$gene_id
+
+# Set samples
+samples <- str_replace_all(fns.uq, "_genes_results", "")
+
+# Merge gene names onto data
+data.g <- merge(key, data, by.x="gene_id", by.y="row.names")
+
+# Remove duplicate genes and NAs
+o <- data.g[order(rowSums(subset(data.g, select=c(samples))), decreasing=TRUE),]
+d <- o[!duplicated(o$GeneName),]
+
+row.names(d) <- d$GeneName
+
+data <- d %>% subset(select=c("transcript_id.s..x", "gene_id", samples))
+
+# Load list of X and Y chromosome genes
+chroms <- read.table("~/resources/ensemblIDS_chromosomes.txt", header=TRUE, stringsAsFactors = FALSE, sep='\t')
+
+# Select only X and Y chromosomes
+xy <- chroms[chroms$Chromosome.scaffold.name %in% c("X", "Y"),]
+
+# Filter data to select sex genes only
+data.xy <- data[data$gene_id %in% xy$Gene.stable.ID.version,]
+
+# Clean up
+rm(chroms, d, data, data.g, genes, key, o, dups, fns, fns.uq, qual)
+
+```
+
+
+#Create summarised experiment data for DeSeq
+```{r SED}
+
+# Reorder and select data by samples
+data.s <- data.xy %>% subset(select=samples)
+
+#Create label of donor sex
+sex <- ifelse(multigrep(c("D04", "D12"), colnames(data.s)), "F", "M")
+
+# Create sample information for DeSeq
+coldata <- data.frame(row.names = colnames(data.s), sex=sex)
+
+# Convert all to integers for DeSeq
+m.int <- apply(data.s, c(1, 2), function(x){
+  (as.integer(x))
+})
+
+# Create DeSeq data
+dds <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ 1)
+
+# Filtering out transcripts with less than 10 counts across all samples (see DeSeq best practices)
+dds <- dds[rowSums(counts(dds)) >= 10,]
+
+# Normalisation
+ntd <- normTransform(dds, f = log2)
+
+```
+
+#Plot t-sne of samples to see if individuals with deletions cluster outside of defined sex
+```{r t-sne}
+
+# Select top 500 genes
+select <- order(rowMeans(counts(dds)), decreasing=TRUE)[1:500]
+
+# Remove batch effect based on donor
+nbatch <- limma::removeBatchEffect(assay(ntd), batch= coldata$donor)
+
+# Select top 500
+ntd500 <- as.matrix(t((nbatch[select,])))
+
+# Run Rtsne with perplexity of 6 (determined from multiple perplexity tests for best sample differentiation)
+tsne <- Rtsne(ntd500, perplexity = 6)
+
+# Create dataframe of data to plot
+tsne_plot <- data.frame(x=tsne$Y[,1], y=tsne$Y[,2], sample=colnames(nbatch), sex=coldata$sex)
+
+# Plot data, colouring on donor sex
+ggplot(data=tsne_plot, aes(x=x, y=y, colour=sex)) + geom_point(size=4)
+
+# Create interactive plotly data
+plot <- ggplot(data=tsne_plot, aes(x=x, y=y, colour=sex, text=sample)) +
+  geom_point(size=4)
+
+(gg <- ggplotly(plot, tooltip=c("text")))
+
+
+```
+

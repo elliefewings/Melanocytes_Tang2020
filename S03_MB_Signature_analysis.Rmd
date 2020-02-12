@@ -1,0 +1,296 @@
+---
+title: "S03_MB_Signature_analysis"
+author: "Eleanor Fewings"
+output: html_document
+---
+
+# start_section  
+
+```{r start_section}
+
+# Time stamp
+Sys.time()
+
+# Clean up
+rm(list=ls())
+
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(deconstructSigs)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(ggplot2)
+library(knitr)
+library(Hmisc)
+library(magrittr)
+library(reshape2)
+library(RColorBrewer)
+library(grid)
+library(gtools)
+library(openxlsx)
+library(multigrep)
+
+# Folders
+setwd("~")
+
+```
+
+# Import ucsf500 panel data 
+```{r import_ucsf_data}
+
+# Import data - table is aggregation of all validated mutation calls from samples
+df.ucsf <- read.table("ucsf_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
+
+# Change chromosome names to the style used in UCSC build (required for deconstructSigs package)
+df.ucsf$CHR <- paste("chr", df.ucsf$CHR, sep="")
+
+df.ucsf$CHR <- gsub("chrMT", "chrM", df.ucsf$CHR)
+
+```
+
+# Import exome data
+```{r import_exome_data}
+
+# Import data - table is aggregation of all validated mutation calls from samples
+df.exome <- read.table("exome_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
+
+# Change chromosome names to the style used in UCSC build (required for deconstructSigs package)
+df.exome$CHR <- paste("chr", df.exome$CHR, sep="")
+
+df.exome$CHR <- gsub("chrMT", "chrM", df.exome$CHR)
+
+# Make sure positions are numeric
+df.exome$POS <- as.numeric(df.exome$POS)
+
+# Label data so we know it came from exome
+df.exome$TYPE <- "EXOME"
+
+```
+
+# Combine exome with ucsf
+```{r combine}
+
+# Create list of samples in each set
+samples.ucsf <- unique(df.ucsf$SAMPLE)
+samples.exome <- unique(df.exome$SAMPLE)
+
+# Remove samples in UCSF data where exome has been sequenced
+df.uc.trim <- df.ucsf[!df.ucsf$SAMPLE %in% samples.exome,]
+
+# Label data so we know it came from UCSF
+df.uc.trim$TYPE <- "UCSF"
+
+# Bind together exome and UCSF data
+df <- rbind(df.uc.trim, df.exome)
+
+# Recreate list of UCSF samples after exomes excluded
+ucsf.samples <- unique(df$SAMPLE[df$TYPE == "UCSF"])
+
+# Clean up
+rm(df.exome, df.uc.trim, df.ucsf, samples.ucsf)
+```
+
+# Calculate mutational signatures
+```{r calculate_mutational_signatures}
+
+# Load UV Signature data from Petljak et al 2019 (signatures 7a, 7b and 7c) 
+abc <- read.table("resources/Signature7abc_PJ.csv", sep="\t", header = TRUE, stringsAsFactors = FALSE)
+
+# Reformat data to match Cosmic signatures
+# Add variant context to rownames
+row.names(abc) <- paste(substr(abc$Subtype, 1, 1), "[", abc$Type, "]", substr(abc$Subtype, 3, 3), sep="")
+
+# Reorder signatures on type
+abc <- abc[order(abc$Type),]
+
+# Select 7a, 7b, and 7c only
+abct <- abc %>% subset(selec=c(Signature7a, Signature7b, Signature7c)) %>% t() %>% as.data.frame()
+
+# Check column names match Cosmic signatures
+sum(colnames(abct) != colnames(signatures.cosmic))
+
+# Merge Petljak data with Cosmic signatures
+all.sigs <- rbind(abct, signatures.cosmic)
+
+# Remove signature 7 from Cosmic signatures
+all.sigs <- all.sigs[row.names(all.sigs) != "Signature.7",]
+
+# Calculate frequency of each mutation signature
+sigs.input <- mut.to.sigs.input(mut.ref = df,
+                                sample.id = "SAMPLE",
+                                chr = "CHR",
+                                pos = "POS",
+                                ref = "REF",
+                                alt = "ALT",
+                                bsg = BSgenome.Hsapiens.UCSC.hg19)
+
+
+# Create list of samples
+samples <- unique(df$SAMPLE)
+
+# Loop to calculate weights for all samples at once (results stored as a matrix)
+results <- sapply(samples, function(x) whichSignatures(tumor.ref = sigs.input,
+                                                       signatures.ref = all.sigs,
+                                                       sample.id = x,
+                                                       contexts.needed = TRUE,
+                                                       tri.counts.method = "default"))
+
+
+# Create tables of results (weights: Proportion of variants attributed to each signature, product: Proportion of variants attributed to each context)
+weights <- lapply(samples, function(x) as.data.frame(results[,x]$weights))
+product <- lapply(samples, function(x) as.data.frame(results[,x]$product))
+
+#Create dataframe of weights and products
+sigs <- do.call(rbind, unname(weights))
+sigs_r <- do.call(rbind, unname(product))
+
+```
+
+# Calculate mutation burdens
+```{r mb}
+
+# Load table of mutation burden calculations and sequencing footprints for each sequencing types and corresponding normal
+mb <- read.table("resources/mutation_burdens_20200211.csv", sep=",", header = TRUE, stringsAsFactors = FALSE)
+
+# Set minimum footprint: If normal has smaller footprint than sample, use this footprint
+mb$exome_footprint <- ifelse(mb$exome_footprint < mb$Normal_ex, mb$exome_footprint, mb$Normal_ex)
+mb$UCSF_footprint <- ifelse(mb$UCSF_footprint < mb$Normal_UCSF, mb$UCSF_footprint, mb$Normal_UCSF)
+
+# Create list of zero mutation samples
+zero <- mb[!mb$Sample %in% samples,]$Sample
+
+# If exome is available, select exome footprint. Otherwise use UCSF
+mb$footprint <- ifelse(is.na(mb$exome_footprint) | mb$Sample %in% ucsf.samples, mb$UCSF_footprint, mb$exome_footprint)
+
+# Label which samples are using exome and which use UCSF
+mb$seq <- ifelse(is.na(mb$exome_footprint)| mb$Sample %in% ucsf.samples, "UCSF", "EXOME")
+
+# Shorten mutation burden table
+mb.short <- mb %>% subset(select=c(Sample, footprint, seq))
+
+# Create mutation count from input data
+mb <- merge(as.data.frame(table(df$SAMPLE)), mb.short, by.x="Var1", by.y="Sample", all.y=TRUE)
+
+# Fill NA values (with zero mutations) with zeros
+mb$Freq[is.na(mb$Freq)] <- 0
+
+# Rename columns
+colnames(mb) <- c("sample", "mut", "footprint", "seq")
+
+# Calculate mutations per megabase using footprint
+mb$mb <- (mb$mut/mb$footprint)*1000000
+
+# Clean up
+rm(mb.short)
+
+```
+
+
+# Plot mutation burdens
+```{r plot_mb}
+
+# Label sites (predominantly to group left and right into one site)
+mb$site[grepl("LAC", mb$sample)] <- "Acral"
+mb$site[grepl("LSN", mb$sample)] <- "Shin"
+mb$site[grepl("LSR", mb$sample)] <- "Shoulder"
+mb$site[grepl("RSR", mb$sample)] <- "Shoulder"
+mb$site[grepl("RBT", mb$sample)] <- "Right Buttock"
+mb$site[grepl("BCC", mb$sample)] <- "Back BCC"
+mb$site[grepl("MIS", mb$sample)] <- "Back MIS"
+mb$site[grepl("RBK", mb$sample)] <- "Back"
+mb$site[grepl("LBK", mb$sample)] <- "Back"
+mb$site[grepl("RFE", mb$sample)] <- "Face"
+mb$site[grepl("RSN", mb$sample)] <- "Shin"
+mb$site[grepl("LTH", mb$sample)] <- "Left Thigh"
+mb$site[grepl("FHD", mb$sample)] <- "Face"
+mb$site[mb$sample %in% paste("D13_MIS", seq(13, 22), sep="")] <- "Ear MIS"
+mb$site[grepl("D13_BCC", mb$sample)] <- "Scalp BCC"
+
+# Label cancer adjacent sites
+mb$cancer <- ifelse(multigrep(c("BCC", "MIS"), mb$site), 1, 0)
+
+# Label donor IDs
+mb$donor[grepl("D04", mb$sample)] <-  "donor4"
+mb$donor[grepl("D06", mb$sample)] <-  "donor6"
+mb$donor[grepl("D07", mb$sample)] <-  "donor7"
+mb$donor[grepl("D10", mb$sample)] <-  "donor10"
+mb$donor[grepl("D12", mb$sample)] <-  "donor12"
+mb$donor[grepl("D13", mb$sample)] <-  "donor13"
+
+# Calculate donor median, donor/site medians, and donor maximums
+mb <- mb %>% group_by(donor) %>% mutate(patmb=median(mb)) %>% group_by(donor, site) %>% mutate(psitemb=median(mb)) %>% group_by(donor) %>% mutate(maxpatsitemb=max(psitemb))
+
+# Order by cancer adjacent (yes first), maximum donor mb, donor/site median, then mb (all decreasing)
+mb <- mb[order(mb$cancer, mb$maxpatsitemb, mb$psitemb, mb$mb, decreasing = TRUE),]
+
+# Create a sample column as factor so order in plot is determined by order in dataframe
+mb$sample2 <- factor(mb$sample, levels=mb$sample)
+
+# Plot mutation burdens
+ggplot(mb, aes(x=sample2, y=mb)) + 
+  geom_bar(stat="identity", fill='#999999', colour='#000000') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.text.y = element_text(size = 15), axis.title.y=element_text(size = 15)) +
+  xlab("") +
+  ylab("Mutation Burden per Megabase\n")
+
+# Save order of samples as factor
+sorder <- mb$sample2
+
+# Save ordered table
+write.csv(mb, "resources/mutation_burdens_plot_20200211.csv")
+
+```
+
+#Plot signatures
+```{r sigs}
+
+# Select top 10 most assigned signatures
+n <- min(as.vector(colSums(sigs))[order(as.vector(colSums(sigs)), decreasing=TRUE)][1:10])
+
+sigs_short <- sigs[,colSums(sigs) >= n]
+
+# Label all other signatures as 'other'
+sigs_short$other <- 1 - rowSums(sigs_short)
+
+# Transpose data
+t <- as.data.frame(t(sigs_short))
+
+t$sig <- row.names(t)
+
+# Create matrix for samples without variants so plot matches mutation burdens created above
+empty <- data.frame(matrix(0, nrow(t), length(zero)), row.names=t$sig)
+colnames(empty) <- zero
+
+# Bind on samples with no mutations
+t <- cbind(t, empty)
+
+# Melt to create one column for all signatures with one row for each sample/signature
+melted <- melt(t, id.vars="sig")
+
+# Create label '*' on samples with UCSF sequencing
+melted$label <- ifelse(melted$variable %in% ucsf.samples & melted$sig == "other", "*", "")
+
+# Convert sample name to character
+melted$variable <- as.character(melted$variable)
+
+# Reorder by sample name as defined in mutation burden plot
+melted <- melted[order(melted$variable),]
+melted$sample <- factor(melted$variable, levels=sorder)
+
+# Manually set signature colours
+cols <- rev(c("#F1592A", "#FCB03F", "#F7941D", "#74BAFF", "#7155A4", "#ADD251", "#2E6B35", "#384EA1", "#3884C5", "#57A744", "#A9A9A9"))
+
+# Plot signature data
+ggplot(melted, aes(x=sample, y=value, fill=sig)) + 
+  geom_bar(stat = "identity") +
+  xlab("\nSample") +
+  ylab("Signaturevalue\n") +
+  scale_fill_manual(values=cols) +
+  scale_y_continuous(expand = c(.1, 0)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_text(aes(label=label), position="stack", size=10) +
+  coord_fixed(ratio = 10)
+
+
+```
+

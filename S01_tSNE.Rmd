@@ -1,0 +1,182 @@
+---
+title: "S01_tSNE"
+author: "Eleanor Fewings"
+output: html_document
+---
+  
+# start_section  
+  
+```{r start_section}
+
+# Time stamp
+Sys.time()
+
+# Clean up
+rm(list=ls())
+
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(Rtsne)
+library(ggplot2)
+library(DESeq2)
+library(pheatmap)
+library(data.table)
+library(stringr)
+library(plotly)
+library(multigrep)
+library(openxlsx)
+
+# Folders
+setwd("~")
+
+```
+
+
+# Import_data
+```{r import_data}
+# Set read dir containing genes_results files
+setwd("~/RNA")
+
+# Create list of files
+fns <- list.files("~/RNA", pattern="*_genes_results", full.names = FALSE)
+
+# Read in TableS1 for sample names and information
+ss <- read.xlsx("TableS1.xlsx", startRow = 2, colNames = TRUE)
+
+# Select samples from TableS1
+fns.uq <- fns[multigrep(ss$ID, fns)]
+
+# Read all files and merge
+data <- do.call("cbind", lapply(fns.uq, function(x) read.table(x, header = TRUE, stringsAsFactors = FALSE, 
+                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(x, "_genes_results", ""), "TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", "FPKM_ci_upper_bound"))))
+
+# Run if errors occur in file opening to find problematic file
+#for (file in fns) { 
+#  print(file)
+#  x <- read.table(file, header = TRUE, stringsAsFactors = FALSE, 
+#                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(file, "_genes_results", ""), #"TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", #"FPKM_ci_upper_bound") )}
+#rm(x, file)
+
+# Set transcript key
+key <- data %>% subset(select=c("gene_id", "transcript_id.s."))
+
+key$transcript <- sapply(strsplit(key$transcript_id.s., ","), '[', 1)
+
+# Add gene names to transcript key
+genes <- read.table("~/resources/Ensembl_IDs.txt", header=TRUE, stringsAsFactors = FALSE)
+key <- merge(key, genes, by="gene_id")
+
+row.names(data) <- key$transcript
+
+# Set samples
+samples <- str_replace_all(fns.uq, "_genes_results", "")
+
+# Merge gene names onto data
+data.g <- merge(key, data, by.x="transcript", by.y="row.names")
+
+# Remove duplicate genes and NAs
+o <- data.g[order(rowSums(subset(data.g, select=c(samples))), decreasing=TRUE),]
+d <- o[!duplicated(o$GeneName),]
+
+row.names(d) <- d$GeneName
+
+data <- d %>% subset(select=c(samples))
+
+# Create matrix
+data.m <- as.matrix(data)
+
+# Clean up
+rm(fns, d, o, data.g, genes, key, data)
+```
+
+# Create DeSeq data set
+```{r DeSeq}
+
+# Create sample information for DeSeq
+coldata <- data.frame(site=rep(NA, length(samples)), donor=rep(NA, length(samples)), row.names = colnames(data.m))
+
+# Infer donor ID and anatomic site
+coldata$donor <- paste("donor", substr(row.names(coldata), 3, 3), sep="")
+coldata$site <- substr(row.names(coldata), 5, 7)
+
+# Create lists of different cell types
+kers <- ss[ss$Cell.Identity == "keratinocyte" & !is.na(ss$ID),]$ID
+fibs <- ss[ss$Cell.Identity == "fibroblast" & !is.na(ss$ID),]$ID
+mels <- ss[ss$Cell.Identity == "melanocyte" & !is.na(ss$ID),]$ID
+
+# Label cell types in coldata
+coldata$cell[row.names(coldata) %in% fibs] <- "Fibroblast"
+coldata$cell[row.names(coldata) %in% kers] <- "Keratinocyte"
+coldata$cell[row.names(coldata) %in% mels] <- "Melanocyte"
+
+# Create binary yes/no for each cell type
+coldata$Fibroblast <- ifelse(coldata$cell == "Fibroblast", "Y", "N")
+coldata$Keratinocyte <- ifelse(coldata$cell == "Keratinocyte", "Y", "N")
+coldata$Melanocyte <- ifelse(coldata$cell == "Melanocyte", "Y", "N")
+
+# Convert all to integers for DeSeq
+m.int <- apply(data.m, c(1, 2), function(x){
+  (as.integer(x))
+})
+
+# Create DeSeq data
+dds <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ 1)
+
+# Filtering out transcripts with less than 10 counts across all samples (see DeSeq best practices)
+dds <- dds[rowSums(counts(dds)) >= 10,]
+
+# Normalisation
+ntd <- normTransform(dds, f = log2)
+
+# Clean up
+rm(data, mels, fibs, kers, data.m)
+
+```
+
+# Plot t-sne
+```{r t-sne}
+
+# Select top 500 genes
+select <- order(rowMeans(counts(dds)), decreasing=TRUE)[1:500]
+
+# Remove batch effect based on donor
+nbatch <- limma::removeBatchEffect(assay(ntd), batch=coldata$donor)
+
+# Select top 500
+ntd500 <- as.matrix(t((nbatch[select,])))
+
+# Run Rtsne with perplexity of 6 (determined from multiple perplexity tests for best sample differentiation)
+tsne <- Rtsne(ntd500, perplexity = 6)
+
+# Create dataframe of data to plot
+tsne_plot <- data.frame(x=tsne$Y[,1], y=tsne$Y[,2], sample=row.names(ntd500), site=coldata$site, cell=coldata$cell, donor=coldata$donor)
+
+# Convert cell type to factor
+tsne_plot$cell <- factor(tsne_plot$cell, levels=c("Melanocyte", "Keratinocyte", "Fibroblast"))
+
+# Label cancer adjacent sites
+tsne_plot$cancer_adj <- ifelse(tsne_plot$site == "BCC" | tsne_plot$site == "MIS", "CADJ", "NORM")
+
+# Plot data, colouring on cell type
+ggplot(data=tsne_plot, aes(x=x, y=y, colour=cell)) + geom_point(size=4)
+
+# Plot data, colouring on anatomic site
+ggplot(data=tsne_plot, aes(x=x, y=y, colour=site)) + geom_point(size=4)
+
+# Plot data, colouring on donor
+ggplot(data=tsne_plot, aes(x=x, y=y, colour=donor)) + geom_point(size=4)
+
+# Plot data, colouring on whether cancer adjacent
+ggplot(data=tsne_plot, aes(x=x, y=y, colour=cancer_adj)) + geom_point(size=4)
+
+
+# Create interactive plotly data
+plot <- ggplot(data=tsne_plot, aes(x=x, y=y, colour=cell, text=sample, cell=cell)) +
+  geom_point(size=4)
+
+(gg <- ggplotly(plot, tooltip=c("text", "cell")))
+
+
+```
+

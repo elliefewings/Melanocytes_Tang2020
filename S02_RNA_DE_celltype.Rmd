@@ -1,0 +1,270 @@
+---
+title: "S02_RNA_DE_celltype"
+author: "Eleanor Fewings"
+output: html_document
+---
+  
+# start_section  
+  
+```{r start_section}
+
+# Time stamp
+Sys.time()
+
+# Clean up
+rm(list=ls())
+
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(Rtsne)
+library(ggplot2)
+library(DESeq2)
+library(pheatmap)
+library(data.table)
+library(stringr)
+library(plotly)
+library(multigrep)
+library(openxlsx)
+
+# Folders
+setwd("~")
+
+```
+
+# Import_data
+```{r import_data}
+# Set read dir containing genes_results files
+setwd("~/RNA")
+
+# Create list of files
+fns <- list.files("~/RNA", pattern="*_genes_results", full.names = FALSE)
+
+# Read in TableS1 for sample names and information
+ss <- read.xlsx("TableS1.xlsx", startRow = 2, colNames = TRUE)
+
+# Select samples from TableS1
+fns.uq <- fns[multigrep(ss$ID, fns)]
+
+# Read all files and merge
+data <- do.call("cbind", lapply(fns.uq, function(x) read.table(x, header = TRUE, stringsAsFactors = FALSE, 
+                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(x, "_genes_results", ""), "TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", "FPKM_ci_upper_bound"))))
+
+# Run if errors occur in file opening to find problematic file
+#for (file in fns) { 
+#  print(file)
+#  x <- read.table(file, header = TRUE, stringsAsFactors = FALSE, 
+#                                                            col.names = c("gene_id", "transcript_id.s.", "length", "effective_length", str_replace_all(file, "_genes_results", ""), #"TPM", "FPKM", "posterior_mean_count", "posterior_standard_deviation_of_count", "pme_TPM", "pme_FPKM", "TPM_ci_lower_bound", "TPM_ci_upper_bound", "FPKM_ci_lower_bound", #"FPKM_ci_upper_bound") )}
+#rm(x, file)
+
+# Set transcript key
+key <- data %>% subset(select=c("gene_id", "transcript_id.s."))
+
+key$transcript <- sapply(strsplit(key$transcript_id.s., ","), '[', 1)
+
+# Add gene names to transcript key
+genes <- read.table("~/resources/Ensembl_IDs.txt", header=TRUE, stringsAsFactors = FALSE)
+key <- merge(key, genes, by="gene_id")
+
+row.names(data) <- key$transcript
+
+# Set samples
+samples <- str_replace_all(fns.uq, "_genes_results", "")
+
+# Merge gene names onto data
+data.g <- merge(key, data, by.x="transcript", by.y="row.names")
+
+# Remove duplicate genes and NAs
+o <- data.g[order(rowSums(subset(data.g, select=c(samples))), decreasing=TRUE),]
+d <- o[!duplicated(o$GeneName),]
+
+row.names(d) <- d$GeneName
+
+data <- d %>% subset(select=c(samples))
+
+# Create matrix
+data.m <- as.matrix(data)
+
+# Clean up
+rm(fns, d, o, data.g, genes, key)
+```
+
+# Create DeSeq data set
+```{r DeSeq}
+
+# Create sample information for DeSeq
+coldata <- data.frame(site=rep(NA, length(samples)), donor=rep(NA, length(samples)), row.names = colnames(data.m))
+
+# Infer donor ID and anatomic site
+coldata$donor <- paste("donor", substr(row.names(coldata), 3, 3), sep="")
+coldata$site <- substr(row.names(coldata), 5, 7)
+
+# Create lists of different cell types
+kers <- ss[ss$Cell.Identity == "keratinocyte" & !is.na(ss$ID),]$ID
+fibs <- ss[ss$Cell.Identity == "fibroblast" & !is.na(ss$ID),]$ID
+mels <- ss[ss$Cell.Identity == "melanocyte" & !is.na(ss$ID),]$ID
+
+# Label cell types in coldata
+coldata$cell[row.names(coldata) %in% fibs] <- "Fibroblast"
+coldata$cell[row.names(coldata) %in% kers] <- "Keratinocyte"
+coldata$cell[row.names(coldata) %in% mels] <- "Melanocyte"
+
+# Create binary yes/no for each cell type
+coldata$Fibroblast <- ifelse(coldata$cell == "Fibroblast", "Y", "N")
+coldata$Keratinocyte <- ifelse(coldata$cell == "Keratinocyte", "Y", "N")
+coldata$Melanocyte <- ifelse(coldata$cell == "Melanocyte", "Y", "N")
+
+# Convert all to integers for DeSeq
+m.int <- apply(data.m, c(1, 2), function(x){
+  (as.integer(x))
+})
+
+# Create sets for each cell type with design set to a comparison of that cell type vs not (yes/no)
+dds <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ cell)
+dds.f <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ Fibroblast)
+dds.m <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ Melanocyte)
+dds.k <- DESeqDataSetFromMatrix(countData=m.int, colData=coldata, design= ~ Keratinocyte)
+
+# Set 'not that cell type' as reference to be compared to
+dds.f$Fibroblast <- relevel(dds.f$Fibroblast, ref = "N")
+dds.k$Keratinocyte <- relevel(dds.k$Keratinocyte, ref = "N")
+dds.m$Melanocyte <- relevel(dds.m$Melanocyte, ref = "N")
+
+# Filtering out transcripts with less than 10 counts across all samples (see DeSeq best practices)
+dds <- dds[rowSums(counts(dds)) >= 10,]
+dds.f <- dds.f[rowSums(counts(dds.f)) >= 10,]
+dds.k <- dds.k[rowSums(counts(dds.k)) >= 10,]
+dds.m <- dds.m[rowSums(counts(dds.m)) >= 10,]
+
+# Clean up
+rm(data.m)
+
+```
+
+# Create gene lists per cell type
+```{r cell types}
+
+# Run differential expression analysis on each cell type
+de <- DESeq(dds)
+de.f <- DESeq(dds.f)
+de.m <- DESeq(dds.m)
+de.k <- DESeq(dds.k)
+
+# Create results sets
+res <- results(de)
+res_fib <- results(de.f, contrast = c("Fibroblast", "Y", "N"))
+res_ker <- results(de.k, contrast = c("Keratinocyte", "Y", "N"))
+res_mel <- results(de.m, contrast = c("Melanocyte", "Y", "N"))
+
+# Set NA p values to 1
+res$padj[is.na(res$padj)] <- 1
+res_fib$padj[is.na(res_fib$padj)] <- 1
+res_ker$padj[is.na(res_ker$padj)] <- 1
+res_mel$padj[is.na(res_mel$padj)] <- 1
+
+# Select significant genes (p < 0.001) for each cell type
+top <- res[res$padj <= 0.001,]
+top_fib <- res_fib[res_fib$padj <= 0.001,]
+top_ker <- res_ker[res_ker$padj <= 0.001,]
+top_mel <- res_mel[res_mel$padj <= 0.001,]
+
+# Create lists of significant genes
+top.g <- row.names(top)
+top_fib.g <- rownames(top_fib)
+top_ker.g <- rownames(top_ker)
+top_mel.g <- rownames(top_mel)
+
+# Clean up
+rm(coldata, m.int, res, res_fib, res_ker, res_mel)
+
+```
+
+# Make dataframe of differences in average expression between cell types
+```{r average}
+
+# Create empty dataframe to fill
+average <- data.frame(Genes=row.names(data), Fibs=NA, Kers=NA, Mels=NA)
+
+# Convert gene names to chracters
+average$Genes <- as.character(average$Genes)
+
+# Calculate average gene expression for each cell type
+average$Fibs <- rowSums(data[,colnames(data) %in% fibs])/length(fibs)
+average$Kers <- rowSums(data[,colnames(data) %in% kers])/length(kers)
+average$Mels <- rowSums(data[,colnames(data) %in% mels])/length(mels)
+
+# Select genes with an increase in average expression in each cell type (over-expressed)
+inc.fib <- average[average$Fibs > average$Kers & average$Fibs > average$Mels & average$Genes %in% top_fib.g,]
+inc.ker <- average[average$Kers > average$Fibs & average$Kers > average$Mels & average$Genes %in% top_ker.g,]
+inc.mel <- average[average$Mels > average$Kers & average$Mels > average$Fibs & average$Genes %in% top_mel.g,]
+
+# Create difference between average cell type expression and average expression in other two cell types
+inc.fib$diff <- inc.fib$Fibs - ((inc.fib$Kers + inc.fib$Mels)/2)
+inc.ker$diff <- inc.ker$Kers - ((inc.ker$Fibs + inc.ker$Mels)/2)
+inc.mel$diff <- inc.mel$Mels - ((inc.mel$Kers + inc.mel$Fibs)/2)
+
+# Merge pvals back on to averages files created above
+mel <- merge(inc.mel, as.data.frame(top_mel), by.y="row.names", by.x="Genes", all.x=TRUE)
+ker <- merge(inc.ker, as.data.frame(top_ker), by.y="row.names", by.x="Genes", all.x=TRUE)
+fib <- merge(inc.fib, as.data.frame(top_fib), by.y="row.names", by.x="Genes", all.x=TRUE)
+
+# Write files containing significant genes
+write.csv(mel, "~/significant_DE_melanocytes.csv")
+write.csv(ker, "~/significant_DE_keratinocytes.csv")
+write.csv(fib, "~/significant_DE_fibroblasts.csv")
+
+rm(top_fib.g, top_ker.g, top_mel.g, top.g, average, fibs, mels, kers)
+```
+
+# Select top 20 genes from each set
+```{r top20}
+
+# Select top 20 genes from each set
+top_fib20 <- inc.fib[order(inc.fib$diff, decreasing = TRUE),][1:20,]
+top_ker20 <- inc.ker[order(inc.ker$diff, decreasing = TRUE),][1:20,]
+top_mel20 <- inc.mel[order(inc.mel$diff, decreasing = TRUE),][1:20,]
+top60 <- row.names(top[order(top$padj, decreasing = TRUE),][1:60,])
+
+# Merge lists of genes
+top.genes <- c(top_fib20$Genes, top_ker20$Genes, top_mel20$Genes)
+
+# Remove NAS from top genes (caused by too few increasing genes in fibroblasts)
+top.genes <- top.genes[!is.na(top.genes)]
+
+rm(fib, ker, mel, inc.fib, inc.mel, inc.ker)
+```
+
+# Plot top 20 genes of each set
+```{r plot t20}
+
+# Normalise (patient correction using Limma does not improve heatmap)
+ntd <- normTransform(dds, f = log2)
+
+# Create annotation data dataframe
+df <- data.frame(group=colData(dds)[,"cell"], row.names = row.names(colData(dds)))
+
+# Select top 20 genes from each set (as defined in previous chunk)
+top.ntd <- ntd[row.names(ntd) %in% top.genes,]
+
+# Order genes to match ordering of top20 in each set
+ordered <- assay(top.ntd)[match(top.genes, row.names(assay(top.ntd))),]
+
+# Plot heatmap
+pheatmap(ordered, cluster_rows=FALSE, cluster_cols=TRUE, show_rownames=TRUE, annotation_col=df)
+
+```
+
+# Plot top 60 DE genes total
+```{r plot t60}
+
+# Create annotation data dataframe
+df <- data.frame(group=colData(dds)[,"cell"], row.names = row.names(colData(dds)))
+
+# Select top 60 genes from all data
+top.ntd <- ntd[row.names(ntd) %in% top60,]
+
+# Plot heatmap
+pheatmap(assay(top.ntd), cluster_rows=TRUE, cluster_cols=TRUE, show_rownames=TRUE, annotation_col=df)
+
+```
+
