@@ -39,7 +39,7 @@ setwd("~")
 ```{r import_ucsf_data}
 
 # Import data - table is aggregation of all validated mutation calls from samples
-df.ucsf <- read.table("ucsf_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
+df.ucsf <- read.table("resources/ucsf_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
 
 # Change chromosome names to the style used in UCSC build (required for deconstructSigs package)
 df.ucsf$CHR <- paste("chr", df.ucsf$CHR, sep="")
@@ -52,7 +52,7 @@ df.ucsf$CHR <- gsub("chrMT", "chrM", df.ucsf$CHR)
 ```{r import_exome_data}
 
 # Import data - table is aggregation of all validated mutation calls from samples
-df.exome <- read.table("exome_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
+df.exome <- read.table("resources/exome_mutation_list_csq_UV_MAF_20200211.txt", header = TRUE, stringsAsFactors = FALSE)
 
 # Change chromosome names to the style used in UCSC build (required for deconstructSigs package)
 df.exome$CHR <- paste("chr", df.exome$CHR, sep="")
@@ -180,6 +180,9 @@ colnames(mb) <- c("sample", "mut", "footprint", "seq")
 # Calculate mutations per megabase using footprint
 mb$mb <- (mb$mut/mb$footprint)*1000000
 
+#Add Confidence Intervals
+mb <- mb %>% rowwise %>% mutate(lowerCI=poisson.test(mut, footprint/1000000, mb)$conf.int[1], upperCI=poisson.test(mut, footprint/1000000, mb)$conf.int[2])
+
 # Clean up
 rm(mb.short)
 
@@ -231,13 +234,15 @@ ggplot(mb, aes(x=sample2, y=mb)) +
   geom_bar(stat="identity", fill='#999999', colour='#000000') +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), axis.text.y = element_text(size = 15), axis.title.y=element_text(size = 15)) +
   xlab("") +
-  ylab("Mutation Burden per Megabase\n")
+  ylab("Mutation Burden per Megabase\n") +
+  geom_errorbar(aes(ymin=lowerCI, ymax=upperCI), width=.2,position=position_dodge(.9))
+
 
 # Save order of samples as factor
 sorder <- mb$sample2
 
 # Save ordered table
-write.csv(mb, "resources/mutation_burdens_plot_20200211.csv")
+#write.csv(mb, "resources/mutation_burdens_plot_20200211.csv")
 
 ```
 
